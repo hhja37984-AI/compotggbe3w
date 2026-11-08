@@ -194,9 +194,40 @@ const binaryOperators = new Set(["and", "or", "tis", "tisnot", "vis", "visnot", 
 const value = text => ({ text });
 const operation = (op, args, macro = false) => ({ op, args, macro });
 
+const calcComparisons = new Map([
+  ["=", "is"], ["==", "is"], ["!=", "isnot"], ["≠", "isnot"],
+  ["<", "<"], ["<=", "<="], ["≤", "<="], [">", ">"], [">=", ">="], ["≥", ">="]
+]);
+const calcComparison = /^(\{\{\s*(?:getglobalvar|getvar)\s*::[^{}]+\}\}|[$@][a-zA-Z0-9_]+|-?(?:\d+(?:\.\d*)?|\.\d+))\s*(==|!=|<=|>=|[=≠<>≤≥])\s*(\{\{\s*(?:getglobalvar|getvar)\s*::[^{}]+\}\}|[$@][a-zA-Z0-9_]+|-?(?:\d+(?:\.\d*)?|\.\d+))$/;
+
+function readCalcComparison(expression) {
+  let formula = expression.trim();
+  while (formula.startsWith("(") && formula.endsWith(")")) {
+    formula = formula.slice(1, -1).trim();
+  }
+  const match = formula.match(calcComparison);
+  if (!match) return null;
+  const [, left, operator, right] = match;
+  const args = [left, right].map(text => {
+    if (text[0] === "$" || text[0] === "@") {
+      const getter = text[0] === "$" ? "getvar" : "getglobalvar";
+      return value("{{" + getter + "::" + text.slice(1) + "}}");
+    }
+    return value(text);
+  });
+  // The RisuAI calculator recognizes a zero literal only when it is spelled 0.
+  if (args.some(arg => Number(arg.text) === 0 && arg.text !== "0")) return null;
+  return { ...operation(calcComparisons.get(operator), args, true), numeric: true };
+}
+
 function readOperand(text) {
   if (!text.startsWith("{{") || scanMacro(text, 0) !== text.length) return value(text);
-  const [name, ...args] = splitArguments(text.slice(2, -2));
+  const body = text.slice(2, -2);
+  if (body.startsWith("? ")) return readCalcComparison(body.slice(2)) ?? { text, raw: true };
+  const [name, ...args] = splitArguments(body);
+  if (name === "calc" && args.length === 1) {
+    return readCalcComparison(args[0]) ?? { text, raw: true };
+  }
   const op = macroComparisons.get(name) || name;
   if ((op === "not" && args.length === 1) ||
       ((comparisons.has(op) || op === "and" || op === "or") && args.length === 2)) {
@@ -229,6 +260,11 @@ function readCondition(expression, useOperators) {
 const quote = text => text === "" ? "빈 문자열" : "‘" + text + "’";
 const isLiteral = node => node.text !== undefined && !node.text.includes("{{");
 
+function hasFinalConsonant(text) {
+  const last = text.replace(/’$/, "").slice(-1).charCodeAt(0);
+  return last >= 0xac00 && last <= 0xd7a3 && (last - 0xac00) % 28 !== 0;
+}
+
 function reference(node, toggles, kind) {
   const text = node.text;
   if (text === undefined) return null;
@@ -258,7 +294,7 @@ function describeOptions(ref, test) {
   if (!matches.length) return name + " 해당하는 옵션 없음";
   if (checkbox) return name + (matches[0] ? " 체크됨" : " 체크 해제됨");
   const names = matches.map(index => quote(toggle.options[index] || "(빈 옵션 · " + index + ")")).join(" · ");
-  return name + "가 " + names + (matches.length > 1 ? " 중 하나" : "");
+  return name + (hasFinalConsonant(name) ? "이 " : "가 ") + names + (matches.length > 1 ? " 중 하나" : "");
 }
 
 function describeTruth(node, toggles, opposite, exactOne = false, kind) {
@@ -283,16 +319,21 @@ function describeValue(node, toggles, kind) {
 }
 
 function describeComparison(node, toggles, opposite) {
-  const [left, right] = node.args;
+  let [left, right] = node.args;
+  let operator = node.op;
+  if (node.numeric && isLiteral(left) && !isLiteral(right)) {
+    [left, right] = [right, left];
+    operator = { "<": ">", "<=": ">=", ">": "<", ">=": "<=" }[operator] || operator;
+  }
   const kind = node.op.startsWith("tis") ? "toggle" : node.op.startsWith("vis") ? "chat" : undefined;
-  const op = kind ? (node.op.endsWith("not") ? "isnot" : "is") : node.op;
+  const op = kind ? (node.op.endsWith("not") ? "isnot" : "is") : operator;
   const test = comparisons.get(op);
   const ref = reference(left, toggles, kind);
   const literal = isLiteral(right);
   const equality = op === "is" || op === "isnot";
   if (ref?.toggle && ["checkbox", "select"].includes(ref.toggle.type) && literal) {
     const number = node.macro ? Number(right.text) : parseFloat(right.text);
-    return describeOptions(ref, index => (equality
+    return describeOptions(ref, index => (equality && !node.numeric
       ? test(String(index), right.text)
       : test(index, number)) !== opposite);
   }
@@ -300,13 +341,13 @@ function describeComparison(node, toggles, opposite) {
   const a = ref?.name ?? describeValue(left, toggles, kind);
   const b = literal ? quote(right.text)
     : reference(right, toggles)?.name ?? describeValue(right, toggles);
-  if (equality) {
-    const last = (literal ? right.text || "문자열" : b.replace(/’$/, "")).slice(-1).charCodeAt(0);
-    const particle = last >= 0xac00 && last <= 0xd7a3 && (last - 0xac00) % 28 ? "과" : "와";
+  if (equality && !node.numeric) {
+    const particle = hasFinalConsonant(b) ? "과" : "와";
     const result = (op === "is") !== opposite ? " 같음" : " 다름";
     return a + (ref?.toggle ? " 입력값이 " : " 값이 ") + b + particle + result;
   }
-  const condition = a + " " + op + " " + b;
+  const symbol = { is: "=", isnot: "≠" }[op] || op;
+  const condition = a + " " + symbol + " " + b;
   return opposite ? "조건 불충족 · (" + condition + ")" : condition;
 }
 
@@ -326,7 +367,7 @@ function describeExpression(node, toggles, opposite = false, exactOne = false, n
 }
 
 function describe({ expression, opposite, condition }, toggles) {
-  return condition.node
+  return condition.node && !condition.node.raw
     ? { text: describeExpression(condition.node, toggles, opposite) }
     : { text: (opposite ? "조건 불충족 · " : "조건 · ") + expression, raw: true };
 }
