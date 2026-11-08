@@ -141,7 +141,7 @@ function readPrompt(source) {
     // Keep line breaks beside structural tags in the source, outside the editable body.
     if (start > 0) start += output.match(/^\r?\n/)?.[0].length || 0;
     if (end < source.length) end -= source.slice(start, end).match(/\r?\n$/)?.[0].length || 0;
-    segments.push({ start, end, path: stack.slice() });
+    segments.push({ start, end, path: stack.filter(frame => frame.condition) });
   }
 
   let outputStart = 0;
@@ -151,12 +151,19 @@ function readPrompt(source) {
       issues.push(`프롬프트 ${lineAt(start)}행에서 닫는 }}를 찾지 못했어요.`);
       break;
     }
-    const body = source.slice(start + 2, end - 2).trim();
-    const opens = body.match(/^#(when|if_pure|if)(?:([ \t]*::|[ \t]+)([\s\S]*))?$/);
-    const closes = body.match(/^\/(when|if_pure|if)$/);
+    const rawBody = source.slice(start + 2, end - 2);
+    const body = rawBody.trim();
     const frame = stack[stack.length - 1];
+    const opens = !frame?.literal && body.match(/^#(when|if_pure|if)(?:([ \t]*::|[ \t]+)([\s\S]*))?$/);
+    const closes = rawBody.startsWith("/") && !rawBody.startsWith("//");
     const branches = body === ":else" && (!frame || (frame.tag === "when" && frame.condition.mode !== "legacy"));
-    if (opens || closes || branches) {
+    const literal = /^#pure(?:_?display)?$|^#escape/.test(rawBody) || (frame?.literal && rawBody.startsWith("#"));
+    // Track non-conditional blocks so their closing tags stay in the editable body.
+    if (literal || /^#code$|^#each|^#func /.test(rawBody)) {
+      stack.push({ literal });
+    } else if (closes && frame && !frame.condition) {
+      stack.pop();
+    } else if (opens || (closes && (frame || /^\/(?:when|if_pure|if)$/.test(body))) || branches) {
       emit(outputStart, start, !opens && frame?.branchStart === outputStart);
       outputStart = end;
       if (opens) {
@@ -164,7 +171,7 @@ function readPrompt(source) {
         const expression = argument.trim();
         const condition = readCondition(expression, tag === "when" && separator?.trim() === "::");
         stack.push({ tag, expression, condition, opposite: false, line: lineAt(start), branchStart: end });
-      } else if (!frame || (closes && closes[1] !== frame.tag)) {
+      } else if (!frame) {
         issues.push("프롬프트 " + lineAt(start) + "행의 {{" + body + "}}에 대응하는 여는 조건 태그가 없어요.");
       } else if (closes) {
         stack.pop();
@@ -176,7 +183,9 @@ function readPrompt(source) {
     start = source.indexOf("{{", end);
   }
   emit(outputStart, source.length);
-  for (const frame of stack) issues.push(`프롬프트 ${frame.line}행의 #${frame.tag}에 닫는 태그가 없어요.`);
+  for (const frame of stack) {
+    if (frame.condition) issues.push(`프롬프트 ${frame.line}행의 #${frame.tag}에 닫는 태그가 없어요.`);
+  }
   return { segments, issues };
 }
 
