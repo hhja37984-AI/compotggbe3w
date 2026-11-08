@@ -19,8 +19,8 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; }
-main { max-width: 900px; margin: auto; padding: clamp(12px, 4vw, 42px) clamp(10px, 3vw, 24px); display: grid; gap: 16px; }
-section { min-width: 0; background: var(--paper); border: 1px solid var(--edge); border-radius: 16px; padding: clamp(12px, 2.4vw, 20px); }
+main { padding: clamp(12px, 2.5vw, 28px); display: grid; gap: 16px; }
+section { min-width: 0; }
 h2 { margin: 0; font-size: 1rem; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -35,13 +35,13 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
 [hidden], .issues:empty, #copy-status:empty { display: none !important; }
 .issues { margin: 0 0 10px; padding: 8px 10px 8px 29px; background: #fbecdb; color: #723b20; border-radius: 8px; font-size: .84rem; overflow-wrap: anywhere; }
 #blocks { display: grid; gap: 10px; }
-.block { min-width: 0; border: 1px solid var(--edge); border-left: 3px solid #c57c6c; border-radius: 9px; background: #fffcf8; padding: 9px; }
+.block { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--edge); border-left: 3px solid #c57c6c; border-radius: 9px; background: #fffcf8; padding: 9px; }
 .block.common { border-left-color: #879c81; }
-.path { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 8px; }
+.block-label { justify-self: start; }
 .condition { background: var(--blush); color: #713d34; border-radius: 5px; padding: 3px 7px; font-size: .84rem; line-height: 1.45; overflow-wrap: anywhere; min-width: 0; }
 .condition.raw { color: #704521; background: #f9ecda; }
 .common .condition { background: var(--green); color: #3c523e; }
-.and, #copy-status { color: #675b53; font-size: .76rem; }
+#copy-status { color: #675b53; font-size: .76rem; }
 .block textarea { min-height: 2.9rem; background: var(--paper); }
 @supports (field-sizing: content) {
   .block textarea { field-sizing: content; max-height: 24rem; }
@@ -223,6 +223,7 @@ const copyStatus = byId("copy-status");
 let toggles = new Map();
 let blockSource = "";
 let editors = [];
+const conditionBlocks = new Map();
 let editingRaw = false;
 let pendingRender;
 
@@ -237,25 +238,30 @@ function showIssues(id, issues) {
   byId(id).replaceChildren(...issues.map(issue => element("li", "", issue)));
 }
 
-function labelBlock(editor) {
-  const { header, path, input } = editor;
-  header.replaceChildren();
-  const labels = [];
-  if (!path.length) header.append(element("span", "condition", "공통"));
-  path.forEach((frame, index) => {
-    const condition = describe(frame, toggles);
-    if (index) header.append(element("span", "and", "그리고"));
-    const chip = element("span", condition.raw ? "condition raw" : "condition", condition.text);
-    chip.title = frame.expression;
-    header.append(chip);
-    labels.push(condition.text);
-  });
-  input.setAttribute("aria-label", labels.length ? labels.join(" 그리고 ") : "공통 프롬프트");
+function labelCondition(block, frame) {
+  const condition = describe(frame, toggles);
+  const label = block.firstElementChild;
+  label.classList.toggle("raw", !!condition.raw);
+  label.textContent = condition.text;
+  label.title = frame.expression;
+  block.setAttribute("aria-label", condition.text);
+}
+
+function appendBlock(parent, frame) {
+  const block = element("div", frame ? "block" : "block common");
+  block.append(element("span", "block-label condition", frame ? "" : "공통"));
+  if (frame) {
+    block.setAttribute("role", "group");
+    conditionBlocks.set(frame, block);
+    labelCondition(block, frame);
+  }
+  parent.append(block);
+  return block;
 }
 
 function updateToggles() {
   toggles = readToggles(togglesInput.value);
-  editors.forEach(labelBlock);
+  conditionBlocks.forEach(labelCondition);
 }
 
 function collectSource(source, fields) {
@@ -291,21 +297,26 @@ function showBlocks({ force = false, moveFocus = false } = {}) {
 
   const selection = promptInput.selectionEnd;
   blockSource = source;
+  const content = document.createDocumentFragment();
+  conditionBlocks.clear();
   editors = segments.map(segment => {
     const { start, end, path } = segment;
-    const card = element("div", path.length ? "block" : "block common");
-    const header = element("div", "path");
+    let parent = content;
+    for (const frame of path) {
+      parent = conditionBlocks.get(frame) || appendBlock(parent, frame);
+    }
+    if (!path.length) parent = appendBlock(content);
+
     const input = element("textarea");
     input.value = source.slice(start, end);
     input.rows = Math.min(8, input.value.split("\n").length);
     input.spellcheck = false;
     input.autocapitalize = "off";
-    const editor = { ...segment, header, input };
-    labelBlock(editor);
-    card.append(header, input);
-    return { ...editor, card };
+    input.setAttribute("aria-label", path.length ? "프롬프트 본문" : "공통 프롬프트");
+    parent.append(input);
+    return { start, end, input };
   });
-  blocks.replaceChildren(...editors.map(editor => editor.card));
+  blocks.replaceChildren(content);
   promptInput.hidden = true;
   blocks.hidden = false;
   view.hidden = false;
@@ -335,6 +346,7 @@ view.addEventListener("click", () => {
   }
   promptInput.value = currentSource();
   editors = [];
+  conditionBlocks.clear();
   blocks.replaceChildren();
   blocks.hidden = true;
   promptInput.hidden = false;
