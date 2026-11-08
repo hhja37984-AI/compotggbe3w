@@ -30,7 +30,7 @@ button:hover { background: var(--blush); }
 button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #copy { background: #f6e2db; color: #75372d; border-color: #e6c5bb; }
 textarea { display: block; width: 100%; border: 1px solid var(--edge); background: #fffcf8; color: inherit; border-radius: 8px; resize: none; overflow: hidden; padding: 10px; font: 1rem/1.55 ui-monospace, "D2Coding", monospace; }
-#toggles { min-height: 5rem; }
+#toggles { min-height: 5rem; resize: vertical; overflow: auto; }
 #prompt { min-height: 13rem; }
 [hidden], .issues:empty, #copy-status:empty { display: none !important; }
 .issues { margin: 0 0 10px; padding: 8px 10px 8px 29px; background: #fbecdb; color: #723b20; border-radius: 8px; font-size: .84rem; overflow-wrap: anywhere; }
@@ -43,7 +43,7 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
 #copy-status { color: #675b53; font-size: .76rem; }
 .block textarea { min-height: 2.9rem; background: var(--paper); }
 @supports (field-sizing: content) {
-  main textarea { field-sizing: content; }
+  main textarea:not(#toggles) { field-sizing: content; }
 }
 #copy-status { margin: 8px 0 0; }
 </style>
@@ -152,65 +152,183 @@ function readPrompt(source) {
       break;
     }
     const body = source.slice(start + 2, end - 2).trim();
-    const opens = /^#when(?:\s*::|$)/.test(body);
-    if (opens || body === ":else" || body === "/when") {
-      const frame = stack[stack.length - 1];
+    const opens = body.match(/^#(when|if_pure|if)(?:([ \t]*::|[ \t]+)([\s\S]*))?$/);
+    const closes = body.match(/^\/(when|if_pure|if)$/);
+    const frame = stack[stack.length - 1];
+    const branches = body === ":else" && (!frame || (frame.tag === "when" && frame.condition.mode !== "legacy"));
+    if (opens || closes || branches) {
       emit(outputStart, start, !opens && frame?.branchStart === outputStart);
       outputStart = end;
       if (opens) {
-        stack.push({ expression: body.replace(/^#when\s*(?:::)?/, "").trim(), opposite: false, line: lineAt(start), branchStart: end });
-      } else if (!stack.length) {
-        issues.push(`프롬프트 ${lineAt(start)}행의 {{${body}}}에 대응하는 #when이 없어요.`);
-      } else if (body === "/when") {
+        const [, tag, separator, argument = ""] = opens;
+        const expression = argument.trim();
+        const condition = readCondition(expression, tag === "when" && separator?.trim() === "::");
+        stack.push({ tag, expression, condition, opposite: false, line: lineAt(start), branchStart: end });
+      } else if (!frame || (closes && closes[1] !== frame.tag)) {
+        issues.push("프롬프트 " + lineAt(start) + "행의 {{" + body + "}}에 대응하는 여는 조건 태그가 없어요.");
+      } else if (closes) {
         stack.pop();
       } else {
-        const current = stack[stack.length - 1];
-        if (current.opposite) issues.push(`프롬프트 ${lineAt(start)}행에 :else가 중복됐어요.`);
-        stack[stack.length - 1] = { ...current, opposite: true, branchStart: end };
+        if (frame.opposite) issues.push("프롬프트 " + lineAt(start) + "행에 :else가 중복됐어요.");
+        stack[stack.length - 1] = { ...frame, opposite: true, branchStart: end };
       }
     }
     start = source.indexOf("{{", end);
   }
   emit(outputStart, source.length);
-  for (const frame of stack) issues.push(`프롬프트 ${frame.line}행의 #when에 닫는 태그가 없어요.`);
+  for (const frame of stack) issues.push(`프롬프트 ${frame.line}행의 #${frame.tag}에 닫는 태그가 없어요.`);
   return { segments, issues };
 }
 
 const comparisons = new Map([
-  ["is", { test: (a, b) => a === b, opposite: "isnot" }],
-  ["isnot", { test: (a, b) => a !== b, opposite: "is" }],
-  ["<", { test: (a, b) => a < b, opposite: ">=" }],
-  ["<=", { test: (a, b) => a <= b, opposite: ">" }],
-  [">", { test: (a, b) => a > b, opposite: "<=" }],
-  [">=", { test: (a, b) => a >= b, opposite: "<" }]
+  ["is", (a, b) => a === b], ["isnot", (a, b) => a !== b],
+  ["<", (a, b) => a < b], ["<=", (a, b) => a <= b],
+  [">", (a, b) => a > b], [">=", (a, b) => a >= b]
 ]);
+const macroComparisons = new Map([
+  ["equal", "is"], ["notequal", "isnot"], ["not_equal", "isnot"],
+  ["greater", ">"], ["less", "<"],
+  ["greaterequal", ">="], ["greater_equal", ">="], ["lessequal", "<="], ["less_equal", "<="]
+]);
+const binaryOperators = new Set(["and", "or", "tis", "tisnot", "vis", "visnot", ...comparisons.keys()]);
+const value = text => ({ text });
+const operation = (op, args, macro = false) => ({ op, args, macro });
 
-function describe({ expression, opposite }, toggles) {
-  const fallback = { text: opposite ? `조건 불충족 · ${expression}` : `조건 · ${expression}`, raw: true };
-  const parts = splitArguments(expression);
-  if (parts.length !== 3) return fallback;
-  const [left, operator, right] = parts;
-  const variable = left.match(/^\{\{\s*getglobalvar\s*::\s*toggle_([^{}]+?)\s*\}\}$/);
-  const toggle = toggles.get(variable ? variable[1] : left);
-  const comparison = comparisons.get(operator);
-  if (!toggle || !comparison || /\{\{|\}\}/.test(right)) return fallback;
-  const effective = opposite ? comparison.opposite : operator;
-  const { label, type, options } = toggle;
-  if (type === "text" || type === "textarea") {
-    if (!["is", "isnot"].includes(effective)) return fallback;
-    return { text: `‘${label}’ 입력값이 ${right ? `‘${right}’` : "빈 문자열"}과 ${effective === "is" ? "같음" : "다름"}` };
+function readOperand(text) {
+  if (!text.startsWith("{{") || scanMacro(text, 0) !== text.length) return value(text);
+  const [name, ...args] = splitArguments(text.slice(2, -2));
+  const op = macroComparisons.get(name) || name;
+  if ((op === "not" && args.length === 1) ||
+      ((comparisons.has(op) || op === "and" || op === "or") && args.length === 2)) {
+    return operation(op, args.map(readOperand), true);
+  }
+  return value(text);
+}
+
+function readCondition(expression, useOperators) {
+  if (!useOperators) return { node: readOperand(expression) };
+  const tokens = splitArguments(expression);
+  let mode;
+  let node = readOperand(tokens.pop());
+  // RisuAI reduces #when operands starting at the right edge.
+  while (tokens.length) {
+    const op = tokens.pop();
+    if (op === "keep" || op === "legacy") {
+      mode = op;
+    } else if (op === "not" || op === "toggle" || op === "var") {
+      node = operation(op, [node]);
+    } else if (tokens.length && binaryOperators.has(op)) {
+      node = operation(op, [readOperand(tokens.pop()), node]);
+    } else {
+      return { node: null, mode };
+    }
+  }
+  return { node, mode };
+}
+
+const quote = text => text === "" ? "빈 문자열" : "‘" + text + "’";
+const isLiteral = node => node.text !== undefined && !node.text.includes("{{");
+
+function reference(node, toggles, kind) {
+  const text = node.text;
+  if (text === undefined) return null;
+  if (kind === "chat") return isLiteral(node) ? { name: "채팅 변수 " + quote(text) } : null;
+  if (kind === "toggle" && !isLiteral(node)) return null;
+  const macro = text.match(/^\{\{\s*(getglobalvar|getvar)\s*::\s*([^{}]+?)\s*\}\}$/);
+  const key = kind === "toggle" && isLiteral(node) ? text
+    : macro?.[1] === "getglobalvar" && macro[2].startsWith("toggle_") ? macro[2].slice(7)
+    : !kind && toggles.has(text) ? text
+    : null;
+  if (key !== null) {
+    const toggle = toggles.get(key);
+    return { name: quote(toggle?.label ?? key), toggle };
+  }
+  if (macro) {
+    return { name: (macro[1] === "getvar" ? "채팅 변수 " : "전역 변수 ") + quote(macro[2]) };
+  }
+  return null;
+}
+
+function describeOptions(ref, test) {
+  const { name, toggle } = ref;
+  const checkbox = toggle.type === "checkbox";
+  const count = checkbox ? 2 : toggle.options.length;
+  const matches = Array.from({ length: count }, (_, index) => index).filter(test);
+  if (matches.length === count) return name + " 모든 옵션에서 충족";
+  if (!matches.length) return name + " 해당하는 옵션 없음";
+  if (checkbox) return name + (matches[0] ? " 체크됨" : " 체크 해제됨");
+  const names = matches.map(index => quote(toggle.options[index] || "(빈 옵션 · " + index + ")")).join(" · ");
+  return name + "가 " + names + (matches.length > 1 ? " 중 하나" : "");
+}
+
+function describeTruth(node, toggles, opposite, exactOne = false, kind) {
+  const ref = reference(node, toggles, kind);
+  if (ref?.toggle && ["checkbox", "select"].includes(ref.toggle.type)) {
+    return describeOptions(ref, index => (index === 1) !== opposite);
+  }
+  const name = ref?.name ?? describeValue(node, toggles, kind);
+  if (!ref && !kind && ["0", "1", "true", "false"].includes(node.text)) {
+    const truthy = node.text === "1" || (!exactOne && node.text === "true");
+    return truthy !== opposite ? "항상 충족" : "항상 불충족";
+  }
+  const expected = exactOne ? "1" : "1 또는 true";
+  return name + " 값이 " + expected + (opposite ? "에 해당하지 않음" : "에 해당함");
+}
+
+function describeValue(node, toggles, kind) {
+  const text = node.text ?? "(" + describeExpression(node, toggles) + ")";
+  if (kind === "toggle") return "토글 " + text;
+  if (kind === "chat") return "채팅 변수 " + text;
+  return text;
+}
+
+function describeComparison(node, toggles, opposite) {
+  const [left, right] = node.args;
+  const kind = node.op.startsWith("tis") ? "toggle" : node.op.startsWith("vis") ? "chat" : undefined;
+  const op = kind ? (node.op.endsWith("not") ? "isnot" : "is") : node.op;
+  const test = comparisons.get(op);
+  const ref = reference(left, toggles, kind);
+  const literal = isLiteral(right);
+  const equality = op === "is" || op === "isnot";
+  if (ref?.toggle && ["checkbox", "select"].includes(ref.toggle.type) && literal) {
+    const number = node.macro ? Number(right.text) : parseFloat(right.text);
+    return describeOptions(ref, index => (equality
+      ? test(String(index), right.text)
+      : test(index, number)) !== opposite);
   }
 
-  const test = comparisons.get(effective).test;
-  const count = type === "checkbox" ? 2 : options.length;
-  if (["is", "isnot"].includes(effective) && !/^(0|[1-9]\d*)$/.test(right)) return fallback;
-  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(right) || !Number.isFinite(Number(right))) return fallback;
-  const matches = Array.from({ length: count }, (_, index) => index).filter(index => test(index, Number(right)));
-  if (matches.length === count) return { text: `‘${label}’ 모든 옵션에서 충족` };
-  if (!matches.length) return { text: `‘${label}’ 해당하는 옵션 없음` };
-  if (type === "checkbox") return { text: `‘${label}’ ${matches[0] ? "체크됨" : "체크 해제됨"}` };
-  const names = matches.map(index => options[index] ? `‘${options[index]}’` : `‘(빈 옵션 · ${index})’`).join(" · ");
-  return { text: `‘${label}’가 ${names}${matches.length > 1 ? " 중 하나" : ""}` };
+  const a = ref?.name ?? describeValue(left, toggles, kind);
+  const b = literal ? quote(right.text)
+    : reference(right, toggles)?.name ?? describeValue(right, toggles);
+  if (equality) {
+    const last = (literal ? right.text || "문자열" : b.replace(/’$/, "")).slice(-1).charCodeAt(0);
+    const particle = last >= 0xac00 && last <= 0xd7a3 && (last - 0xac00) % 28 ? "과" : "와";
+    const result = (op === "is") !== opposite ? " 같음" : " 다름";
+    return a + (ref?.toggle ? " 입력값이 " : " 값이 ") + b + particle + result;
+  }
+  const condition = a + " " + op + " " + b;
+  return opposite ? "조건 불충족 · (" + condition + ")" : condition;
+}
+
+function describeExpression(node, toggles, opposite = false, exactOne = false, nested = false) {
+  const { op, args, macro } = node;
+  if (!op) return describeTruth(node, toggles, opposite, exactOne);
+  if (op === "not") return describeExpression(args[0], toggles, !opposite, macro, nested);
+  if (op === "toggle" || op === "var") {
+    return describeTruth(args[0], toggles, opposite, false, op === "var" ? "chat" : "toggle");
+  }
+  if (op === "and" || op === "or") {
+    const joiner = (op === "and") !== opposite ? " 그리고 " : " 또는 ";
+    const text = args.map(arg => describeExpression(arg, toggles, opposite, macro, true)).join(joiner);
+    return nested ? "(" + text + ")" : text;
+  }
+  return describeComparison(node, toggles, opposite);
+}
+
+function describe({ expression, opposite, condition }, toggles) {
+  return condition.node
+    ? { text: describeExpression(condition.node, toggles, opposite) }
+    : { text: (opposite ? "조건 불충족 · " : "조건 · ") + expression, raw: true };
 }
 
 const byId = id => document.getElementById(id);
@@ -228,7 +346,7 @@ let editingRaw = false;
 let pendingRender;
 
 function fitTextarea(input) {
-  if (nativeFieldSizing || !input.getClientRects().length) return;
+  if (nativeFieldSizing || input === togglesInput || !input.getClientRects().length) return;
   input.style.height = "0px";
   const borderHeight = input.offsetHeight - input.clientHeight;
   input.style.height = input.scrollHeight + borderHeight + "px";
