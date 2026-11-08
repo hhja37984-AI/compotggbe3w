@@ -32,12 +32,8 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent);
 textarea { display: block; width: 100%; border: 1px solid var(--edge); background: #fffcf8; color: inherit; border-radius: 8px; resize: vertical; padding: 10px; font: 1rem/1.55 ui-monospace, "D2Coding", monospace; }
 #toggles { min-height: 5rem; }
 #prompt { min-height: 13rem; }
-[hidden], #toggle-map:empty, .issues:empty, #copy-status:empty { display: none !important; }
-#toggle-map { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.mapping { background: var(--green); color: #3c523e; border-radius: 6px; padding: 3px 7px; font-size: .78rem; overflow-wrap: anywhere; }
-.mapping code { color: #465849; }
+[hidden], .issues:empty, #copy-status:empty { display: none !important; }
 .issues { margin: 0 0 10px; padding: 8px 10px 8px 29px; background: #fbecdb; color: #723b20; border-radius: 8px; font-size: .84rem; overflow-wrap: anywhere; }
-#toggle-issues:not(:empty) { margin: 10px 0 0; }
 #blocks { display: grid; gap: 10px; }
 .block { min-width: 0; border: 1px solid var(--edge); border-left: 3px solid #c57c6c; border-radius: 9px; background: #fffcf8; padding: 9px; }
 .block.common { border-left-color: #879c81; }
@@ -58,8 +54,6 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
   <section aria-labelledby="toggle-title">
     <div class="toolbar"><h2 id="toggle-title"><label for="toggles">커스텀 토글</label></h2></div>
     <textarea id="toggles" rows="3" spellcheck="false" autocapitalize="off"></textarea>
-    <div id="toggle-map"></div>
-    <ul id="toggle-issues" class="issues"></ul>
   </section>
   <section aria-labelledby="prompt-title">
     <div class="toolbar">
@@ -80,21 +74,15 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
 
 function readToggles(source) {
   const toggles = new Map();
-  const issues = [];
-  source.split(/\r?\n/).forEach((line, index) => {
-    if (!line.trim()) return;
+  for (const line of source.split(/\r?\n/)) {
+    if (!line.trim()) continue;
     const [key, label, type = "checkbox", ...rest] = line.split("=").map(part => part.trim());
     const options = type === "select" ? rest.join("=").split(",").map(value => value.trim()) : [];
     const validType = ["checkbox", "select", "text", "textarea"].includes(type);
-    if (!key || !label || !validType || (type === "select" ? !options.some(Boolean) : rest.length)) {
-      issues.push(`토글 ${index + 1}행의 형식을 확인해 주세요.`);
-    } else if (toggles.has(key)) {
-      issues.push(`토글 ${index + 1}행의 변수명 ${key}이(가) 중복됩니다. 먼저 나온 정의를 사용했어요.`);
-    } else {
-      toggles.set(key, { label, type, options });
-    }
-  });
-  return { toggles, issues };
+    if (!key || !label || !validType || (type === "select" ? !options.some(Boolean) : rest.length)) continue;
+    if (!toggles.has(key)) toggles.set(key, { label, type, options });
+  }
+  return toggles;
 }
 
 function scanMacro(source, start) {
@@ -266,16 +254,7 @@ function labelBlock(editor) {
 }
 
 function updateToggles() {
-  const parsed = readToggles(togglesInput.value);
-  toggles = parsed.toggles;
-  const mapping = byId("toggle-map");
-  mapping.replaceChildren();
-  for (const [key, toggle] of toggles) {
-    const item = element("span", "mapping", toggle.label + " ↔ ");
-    item.append(element("code", "", key));
-    mapping.append(item);
-  }
-  showIssues("toggle-issues", parsed.issues);
+  toggles = readToggles(togglesInput.value);
   editors.forEach(labelBlock);
 }
 
