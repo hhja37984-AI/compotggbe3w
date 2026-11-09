@@ -53,18 +53,19 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
 <main>
   <section aria-labelledby="toggle-title">
     <div class="toolbar"><h2 id="toggle-title"><label for="toggles">커스텀 토글</label></h2></div>
-    <textarea id="toggles" rows="3" spellcheck="false" autocapitalize="off"></textarea>
+    <textarea id="toggles" autocomplete="off" rows="3" spellcheck="false" autocapitalize="off"></textarea>
   </section>
   <section aria-labelledby="prompt-title">
     <div class="toolbar">
       <h2 id="prompt-title">프롬프트</h2>
       <div class="actions">
         <button id="view" type="button" hidden></button>
+        <button id="reload" type="button">새로고침</button>
         <button id="copy" type="button">원문 복사</button>
       </div>
     </div>
     <ul id="prompt-issues" class="issues" aria-live="polite"></ul>
-    <textarea id="prompt" aria-labelledby="prompt-title" rows="10" spellcheck="false" autocapitalize="off"></textarea>
+    <textarea id="prompt" autocomplete="off" aria-labelledby="prompt-title" rows="10" spellcheck="false" autocapitalize="off"></textarea>
     <div id="blocks" hidden></div>
     <p id="copy-status" role="status"></p>
   </section>
@@ -388,6 +389,7 @@ const promptInput = byId("prompt");
 const blocks = byId("blocks");
 const view = byId("view");
 const copyStatus = byId("copy-status");
+const reloadDraftKey = "risu-cbs:reload:" + location.pathname;
 const nativeFieldSizing = CSS.supports("field-sizing", "content");
 let toggles = new Map();
 let blockSource = "";
@@ -572,6 +574,36 @@ byId("copy").addEventListener("click", async () => {
   }
   copyStatus.textContent = "복사했어요.";
 });
+byId("reload").addEventListener("click", () => {
+  try {
+    sessionStorage.setItem(reloadDraftKey, JSON.stringify({
+      toggles: togglesInput.value,
+      prompt: currentSource()
+    }));
+  } catch {
+    copyStatus.textContent = "입력을 보관할 수 없어 새로고침을 멈췄어요.";
+    return;
+  }
+  location.reload();
+});
+
+function restoreReloadDraft() {
+  let draft;
+  try {
+    draft = JSON.parse(sessionStorage.getItem(reloadDraftKey));
+  } catch {
+    return;
+  }
+  if (typeof draft?.toggles !== "string" || typeof draft.prompt !== "string") return;
+  togglesInput.value = draft.toggles;
+  promptInput.value = draft.prompt;
+  updateToggles();
+  fitTextarea(promptInput);
+  showBlocks();
+  sessionStorage.removeItem(reloadDraftKey);
+}
+
+restoreReloadDraft();
 </script>
 </body>
 </html>
