@@ -301,7 +301,7 @@ function reference(node, toggles, kind) {
   return null;
 }
 
-const checkboxStates = ["체크 해제됨", "체크됨"];
+const checkboxStates = ["OFF", "ON"];
 
 function describeOptions(ref, test) {
   const { name, toggle } = ref;
@@ -522,7 +522,8 @@ function makeTabs(panels, toggle, choices, frames) {
   const tablist = element("div", "tab-list");
   tablist.setAttribute("role", "tablist");
   tablist.setAttribute("aria-label", toggle.label);
-  header.append(element("span", "", name + (hasFinalConsonant(name) ? "이" : "가")), tablist);
+  const heading = toggle.type === "checkbox" ? name : name + (hasFinalConsonant(name) ? "이" : "가");
+  header.append(element("span", "", heading), tablist);
   panels[0].before(group);
   group.append(header, ...panels);
   const groupId = "condition-tabs-" + tabGroups.length;
