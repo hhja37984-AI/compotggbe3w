@@ -43,6 +43,11 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
 .condition.raw { color: #704521; background: #f9ecda; }
 .common .condition { background: var(--green); color: #3c523e; }
 #copy-status { color: #675b53; font-size: .76rem; }
+.tab-group > .block { margin-inline-start: 0; }
+.tab-header, .tab-list { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.tab-header { column-gap: 8px; }
+.tab-list > button { min-height: 30px; padding: 2px 8px; border-color: transparent; background: transparent; color: inherit; }
+.tab-list > button:hover, .tab-list > [aria-selected="true"] { background: var(--paper); border-color: var(--edge); }
 .block > textarea { min-height: 2.9rem; background: var(--paper); margin: 0; border: 0; border-radius: 0; }
 .block > textarea:focus-visible { outline-offset: -2px; }
 @supports (field-sizing: content) {
@@ -331,7 +336,7 @@ function describeValue(node, toggles, kind) {
   return text;
 }
 
-function describeComparison(node, toggles, opposite) {
+function comparisonDetails(node, toggles, opposite) {
   let [left, right] = node.args;
   let operator = node.op;
   if (node.numeric && isLiteral(left) && !isLiteral(right)) {
@@ -344,11 +349,17 @@ function describeComparison(node, toggles, opposite) {
   const ref = reference(left, toggles, kind);
   const literal = isLiteral(right);
   const equality = op === "is" || op === "isnot";
-  if (ref?.toggle && ["checkbox", "select"].includes(ref.toggle.type) && literal) {
-    const number = node.macro ? Number(right.text) : parseFloat(right.text);
-    return describeOptions(ref, index => (equality && !node.numeric
-      ? test(String(index), right.text)
-      : test(index, number)) !== opposite);
+  const number = node.macro ? Number(right.text) : parseFloat(right.text);
+  const matches = literal ? index => (equality && !node.numeric
+    ? test(String(index), right.text)
+    : test(index, number)) !== opposite : null;
+  return { left, right, kind, op, ref, literal, equality, matches };
+}
+
+function describeComparison(node, toggles, opposite) {
+  const { left, right, kind, op, ref, literal, equality, matches } = comparisonDetails(node, toggles, opposite);
+  if (ref?.toggle && ["checkbox", "select"].includes(ref.toggle.type) && matches) {
+    return describeOptions(ref, matches);
   }
 
   const a = ref?.name ?? describeValue(left, toggles, kind);
@@ -397,6 +408,8 @@ let toggles = new Map();
 let blockSource = "";
 let editors = [];
 const conditionBlocks = new Map();
+const tabGroups = [];
+const selectedPanels = new Set();
 let editingRaw = false;
 let pendingRender;
 
@@ -439,9 +452,122 @@ function appendBlock(parent, frame) {
   return block;
 }
 
+function tabChoice(frame) {
+  let node = frame?.condition.node;
+  let opposite = frame?.opposite;
+  while (node?.op === "not") {
+    node = node.args[0];
+    opposite = !opposite;
+  }
+  if (!node || !comparisons.has(node.op) && !["tis", "tisnot"].includes(node.op)) return null;
+  const { ref, matches } = comparisonDetails(node, toggles, opposite);
+  if (ref?.toggle?.type !== "select" || !matches) return null;
+  const indexes = ref.toggle.options.map((_, index) => index).filter(matches);
+  return indexes.length ? { toggle: ref.toggle, indexes } : null;
+}
+
+function rebuildTabs() {
+  for (const { group, panels, active } of tabGroups.splice(0).reverse()) {
+    for (const panel of panels) {
+      panel.hidden = false;
+      panel.firstElementChild.hidden = false;
+      panel.removeAttribute("id");
+      panel.removeAttribute("aria-labelledby");
+      panel.setAttribute("role", "group");
+    }
+    group.replaceWith(...panels);
+    selectedPanels.add(panels[active]);
+  }
+  const frames = new Map(Array.from(conditionBlocks, ([frame, block]) => [block, frame]));
+  const choices = new Map(Array.from(frames, ([block, frame]) => [block, tabChoice(frame)]));
+  groupSiblings(blocks);
+  selectedPanels.clear();
+
+  function groupSiblings(parent) {
+    const siblings = Array.from(parent.children);
+    for (const block of siblings) {
+      if (block.classList.contains("block")) groupSiblings(block);
+    }
+    let run = [];
+    let used = new Set();
+    let toggle;
+    function flush() {
+      if (run.length > 1) makeTabs(run, toggle, choices, frames);
+      run = [];
+      used = new Set();
+      toggle = undefined;
+    }
+    for (const sibling of siblings) {
+      const choice = choices.get(sibling);
+      if (!choice || choice.toggle !== toggle || choice.indexes.some(index => used.has(index))) flush();
+      if (!choice) continue;
+      toggle = choice.toggle;
+      run.push(sibling);
+      choice.indexes.forEach(index => used.add(index));
+    }
+    flush();
+  }
+}
+
+function makeTabs(panels, toggle, choices, frames) {
+  const group = element("div", "block tab-group");
+  const header = element("div", "block-label condition tab-header");
+  const name = quote(toggle.label);
+  const tablist = element("div", "tab-list");
+  tablist.setAttribute("role", "tablist");
+  tablist.setAttribute("aria-label", toggle.label);
+  header.append(element("span", "", name + (hasFinalConsonant(name) ? "이" : "가")), tablist);
+  panels[0].before(group);
+  group.append(header, ...panels);
+  const groupId = "condition-tabs-" + tabGroups.length;
+  const state = { group, panels, active: 0 };
+  tabGroups.push(state);
+  const buttons = panels.map((panel, index) => {
+    const labels = choices.get(panel).indexes.map(i => toggle.options[i] || "(빈 옵션 · " + i + ")");
+    const button = element("button", "", labels.join(" · "));
+    button.type = "button";
+    button.id = groupId + "-tab-" + index;
+    button.title = frames.get(panel).expression;
+    panel.id = groupId + "-panel-" + index;
+    panel.firstElementChild.hidden = true;
+    panel.setAttribute("role", "tabpanel");
+    panel.setAttribute("aria-labelledby", button.id);
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", panel.id);
+    button.addEventListener("click", () => activate(index));
+    button.addEventListener("keydown", event => {
+      const next = {
+        ArrowLeft: (index + panels.length - 1) % panels.length,
+        ArrowRight: (index + 1) % panels.length,
+        Home: 0,
+        End: panels.length - 1
+      }[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      activate(next);
+      buttons[next].focus();
+    });
+    tablist.append(button);
+    return button;
+  });
+  function activate(index) {
+    state.active = index;
+    panels.forEach((panel, i) => {
+      const active = i === index;
+      panel.hidden = !active;
+      buttons[i].tabIndex = active ? 0 : -1;
+      buttons[i].setAttribute("aria-selected", String(active));
+    });
+    panels[index].querySelectorAll("textarea").forEach(fitTextarea);
+  }
+  const selected = panels.findIndex(panel => selectedPanels.has(panel));
+  activate(Math.max(0, selected));
+}
+
 function updateToggles() {
   toggles = readToggles(togglesInput.value);
   conditionBlocks.forEach(labelCondition);
+  if (!blocks.hidden) rebuildTabs();
 }
 
 function collectSource(source, fields) {
@@ -499,13 +625,15 @@ function showBlocks({ force = false, moveFocus = false } = {}) {
   blocks.replaceChildren(content);
   promptInput.hidden = true;
   blocks.hidden = false;
+  rebuildTabs();
   editors.forEach(({ input }) => fitTextarea(input));
   view.hidden = false;
   view.textContent = "CBS 편집";
   editingRaw = false;
 
   if (moveFocus) {
-    const editor = editors.find(item => item.end >= selection) || editors[editors.length - 1];
+    const visible = editors.filter(item => !item.input.closest("[hidden]"));
+    const editor = visible.find(item => item.end >= selection) || visible.at(-1);
     const caret = Math.max(0, Math.min(selection - editor.start, editor.input.value.length));
     editor.input.focus();
     editor.input.setSelectionRange(caret, caret);
@@ -540,6 +668,7 @@ view.addEventListener("click", () => {
   promptInput.value = currentSource();
   editors = [];
   conditionBlocks.clear();
+  tabGroups.length = 0;
   blocks.replaceChildren();
   blocks.hidden = true;
   promptInput.hidden = false;
