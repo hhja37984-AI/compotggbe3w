@@ -303,6 +303,8 @@ function reference(node, toggles, kind) {
   return null;
 }
 
+const checkboxStates = ["체크 해제됨", "체크됨"];
+
 function describeOptions(ref, test) {
   const { name, toggle } = ref;
   const checkbox = toggle.type === "checkbox";
@@ -310,7 +312,7 @@ function describeOptions(ref, test) {
   const matches = Array.from({ length: count }, (_, index) => index).filter(test);
   if (matches.length === count) return name + " 모든 옵션에서 충족";
   if (!matches.length) return name + " 해당하는 옵션 없음";
-  if (checkbox) return name + (matches[0] ? " 체크됨" : " 체크 해제됨");
+  if (checkbox) return name + " " + checkboxStates[matches[0]];
   const names = matches.map(index => quote(toggle.options[index] || "(빈 옵션 · " + index + ")")).join(" · ");
   return name + (hasFinalConsonant(name) ? "이 " : "가 ") + names + (matches.length > 1 ? " 중 하나" : "");
 }
@@ -459,11 +461,17 @@ function tabChoice(frame) {
     node = node.args[0];
     opposite = !opposite;
   }
-  if (!node || !comparisons.has(node.op) && !["tis", "tisnot"].includes(node.op)) return null;
+  if (!node) return null;
+  if (!node.op || node.op === "toggle") {
+    const ref = node.op ? reference(node.args[0], toggles, "toggle") : reference(node, toggles);
+    return ref?.toggle?.type === "checkbox" ? { toggle: ref.toggle, indexes: [opposite ? 0 : 1] } : null;
+  }
+  if (!comparisons.has(node.op) && !["tis", "tisnot"].includes(node.op)) return null;
   const { ref, matches } = comparisonDetails(node, toggles, opposite);
-  if (ref?.toggle?.type !== "select" || !matches) return null;
-  const indexes = ref.toggle.options.map((_, index) => index).filter(matches);
-  return indexes.length ? { toggle: ref.toggle, indexes } : null;
+  const toggle = ref?.toggle;
+  if (!toggle || !matches || !["checkbox", "select"].includes(toggle.type)) return null;
+  const indexes = (toggle.type === "checkbox" ? [0, 1] : toggle.options.map((_, index) => index)).filter(matches);
+  return indexes.length ? { toggle, indexes } : null;
 }
 
 function rebuildTabs() {
@@ -523,7 +531,9 @@ function makeTabs(panels, toggle, choices, frames) {
   const state = { group, panels, active: 0 };
   tabGroups.push(state);
   const buttons = panels.map((panel, index) => {
-    const labels = choices.get(panel).indexes.map(i => toggle.options[i] || "(빈 옵션 · " + i + ")");
+    const labels = choices.get(panel).indexes.map(i => toggle.type === "checkbox"
+      ? checkboxStates[i]
+      : toggle.options[i] || "(빈 옵션 · " + i + ")");
     const button = element("button", "", labels.join(" · "));
     button.type = "button";
     button.id = groupId + "-tab-" + index;
