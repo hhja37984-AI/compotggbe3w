@@ -51,6 +51,27 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
 @supports (field-sizing: content) {
   main textarea:not(#toggles) { field-sizing: content; }
 }
+#cbs-output {
+  overflow-x: auto;
+  padding: 8px 0;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: var(--paper);
+  font: .9rem/1.65 ui-monospace, "D2Coding", monospace;
+}
+.cbs-line { display: flex; min-width: max-content; }
+.cbs-line-number { flex: 0 0 auto; min-width: 4ch; padding: 0 1ch; text-align: right; color: #73665d; user-select: none; }
+.cbs-line-text { white-space: pre; padding-right: 1ch; font: inherit; tab-size: 2; }
+.cbs-guide { display: inline-block; vertical-align: bottom; width: 2ch; height: 1.65em; border-left: 1px solid var(--pair-color); opacity: .34; }
+[data-color="0"] { --pair-color: #873b76; }
+[data-color="1"] { --pair-color: #265a9b; }
+[data-color="2"] { --pair-color: #346639; }
+[data-color="3"] { --pair-color: #8b4a13; }
+.cbs-tag { color: var(--pair-color, #635750); }
+.cbs-unmatched { text-decoration: underline wavy #aa352c; text-underline-offset: .2em; }
+.cbs-pair-active { background: #f0e3d9; outline: 1px solid var(--pair-color); border-radius: 2px; }
+.cbs-tag-button { display: inline; min-height: 0; border: 0; padding: 0; border-radius: 2px; background: transparent; font: inherit; white-space: inherit; }
+#cbs-view[aria-pressed="true"] { border-color: var(--accent); background: var(--blush); }
 #copy-status { margin: 8px 0 0; }
 </style>
 </head>
@@ -65,6 +86,7 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
       <h2 id="prompt-title">프롬프트</h2>
       <div class="actions">
         <button id="view" type="button" hidden></button>
+        <button id="cbs-view" type="button" aria-pressed="false" aria-controls="cbs-output">CBS 뷰어</button>
         <button id="reload" type="button">새로고침</button>
         <button id="copy" type="button">원문 복사</button>
       </div>
@@ -72,6 +94,7 @@ textarea { display: block; width: 100%; border: 1px solid var(--edge); backgroun
     <ul id="prompt-issues" class="issues" aria-live="polite"></ul>
     <textarea id="prompt" autocomplete="off" aria-labelledby="prompt-title" rows="10" spellcheck="false" autocapitalize="off"></textarea>
     <div id="blocks" hidden></div>
+    <div id="cbs-output" role="region" aria-label="CBS 코드" tabindex="0" hidden></div>
     <p id="copy-status" role="status"></p>
   </section>
 </main>
@@ -105,6 +128,137 @@ function scanMacro(source, start) {
     }
   }
   return -1;
+}
+
+function readViewerTags(source) {
+  const tags = [];
+  const stack = [];
+  for (let start = source.indexOf("{{"); start >= 0;) {
+    const end = scanMacro(source, start);
+    if (end < 0) {
+      tags.push({ start, end: source.length, depth: stack.length, kind: "unmatched" });
+      break;
+    }
+    const body = source.slice(start + 2, end - 2).trim();
+    const frame = stack.at(-1);
+    const opener = body.match(/^#(when|if_pure|if|each|pure_?display|pure|escape|code|func)(?=$|\s|::)/)?.[1];
+    const closer = body.match(/^\/([a-z_][\w-]*)?$/i);
+    const tag = { start, end, depth: stack.length, kind: "macro" };
+
+    if (closer && frame && (!closer[1] || closer[1] === frame.name)) {
+      stack.pop();
+      Object.assign(tag, { depth: frame.depth, kind: "close", pair: frame.start });
+    } else if (frame?.literal) {
+      start = source.indexOf("{{", end);
+      continue;
+    } else if (opener) {
+      Object.assign(tag, { kind: "open", name: opener, pair: start, literal: /^(?:pure|escape)/.test(opener) });
+      if (opener === "when") {
+        const argument = body.match(/^#when[ \t]*::([\s\S]*)$/)?.[1];
+        tag.mode = argument === undefined ? undefined : readCondition(argument, true).mode;
+      }
+      stack.push(tag);
+    } else if (closer) {
+      tag.kind = "unmatched";
+    } else if (body === ":else") {
+      if (frame?.name === "when" && frame.mode !== "legacy" && !frame.branch) {
+        Object.assign(tag, { depth: frame.depth, kind: "branch", pair: frame.start });
+        frame.branch = tag;
+      } else {
+        tag.kind = "unmatched";
+      }
+    }
+    tags.push(tag);
+    start = source.indexOf("{{", end);
+  }
+  for (const frame of stack) {
+    frame.unmatched = true;
+    if (frame.branch) frame.branch.unmatched = true;
+  }
+  return tags;
+}
+
+function renderViewer(source) {
+  const tags = readViewerTags(source);
+  const content = document.createDocumentFragment();
+  let lineStart = 0;
+  let tagIndex = 0;
+  let depth = 0;
+  const pairedElements = new Map();
+  let activePair = [];
+
+  for (const [index, line] of source.split("\n").entries()) {
+    const lineEnd = lineStart + line.length;
+    const leadingSpace = line.match(/^[ \t]*/)[0].length;
+    const firstTag = tags[tagIndex];
+    const startsWithBoundary = firstTag?.start === lineStart + leadingSpace &&
+      ["open", "close", "branch"].includes(firstTag.kind);
+    const indent = startsWithBoundary ? firstTag.depth : depth;
+    const row = element("div", "cbs-line");
+    const number = element("span", "cbs-line-number", String(index + 1));
+    number.setAttribute("aria-hidden", "true");
+    const code = element("code", "cbs-line-text");
+    row.append(number, code);
+
+    for (let level = 0; level < indent; level++) {
+      const guide = element("span", "cbs-guide");
+      guide.dataset.color = level % 4;
+      guide.setAttribute("aria-hidden", "true");
+      code.append(guide);
+    }
+
+    const continuesTag = firstTag?.start < lineStart;
+    let offset = lineStart + (!continuesTag && (depth || startsWithBoundary) ? leadingSpace : 0);
+    while (tags[tagIndex]?.start < lineEnd) {
+      const tag = tags[tagIndex];
+      const start = Math.max(offset, tag.start);
+      const end = Math.min(lineEnd, tag.end);
+      code.append(source.slice(offset, start));
+      const span = element("span", "cbs-tag", source.slice(start, end));
+      if (tag.pair !== undefined) {
+        span.dataset.color = tag.depth % 4;
+        if (tag.start >= lineStart && end > start) {
+          const button = element("button", "cbs-tag-button");
+          button.type = "button";
+          button.setAttribute("aria-pressed", "false");
+          button.append(span);
+          code.append(button);
+          button.addEventListener("click", () => {
+            const group = pairedElements.get(tag.pair);
+            const next = activePair === group ? [] : group;
+            for (const part of activePair) {
+              part.classList.remove("cbs-pair-active");
+              part.parentElement.closest("button")?.setAttribute("aria-pressed", "false");
+            }
+            for (const part of next) {
+              part.classList.add("cbs-pair-active");
+              part.parentElement.closest("button")?.setAttribute("aria-pressed", "true");
+            }
+            activePair = next;
+          });
+        } else {
+          code.append(span);
+        }
+        if (!pairedElements.has(tag.pair)) pairedElements.set(tag.pair, []);
+        pairedElements.get(tag.pair).push(span);
+      } else {
+        code.append(span);
+      }
+      if (tag.unmatched || tag.kind === "unmatched") {
+        span.classList.add("cbs-unmatched");
+        span.title = "짝을 찾을 수 없는 태그";
+      }
+      offset = end;
+      if (tag.end > lineEnd) break;
+      if (tag.kind === "open") depth++;
+      if (tag.kind === "close") depth--;
+      tagIndex++;
+    }
+    code.append(source.slice(offset, lineEnd));
+    content.append(row);
+    lineStart = lineEnd + 1;
+  }
+  viewerOutput.replaceChildren(content);
 }
 
 function splitArguments(source) {
@@ -412,6 +566,9 @@ const tabGroups = [];
 const selectedPanels = new Set();
 let editingRaw = false;
 let pendingRender;
+const viewerButton = byId("cbs-view");
+const viewerOutput = byId("cbs-output");
+let viewerReturnToBlocks = false;
 
 function fitTextarea(input) {
   if (nativeFieldSizing || input === togglesInput || !input.getClientRects().length) return;
@@ -576,7 +733,7 @@ function makeTabs(panels, toggle, choices, frames) {
 function updateToggles() {
   toggles = readToggles(togglesInput.value);
   conditionBlocks.forEach(labelCondition);
-  if (!blocks.hidden) rebuildTabs();
+  if (!blocks.hidden || (!viewerOutput.hidden && viewerReturnToBlocks)) rebuildTabs();
 }
 
 function collectSource(source, fields) {
@@ -591,7 +748,8 @@ function collectSource(source, fields) {
 }
 
 function currentSource() {
-  return blocks.hidden ? promptInput.value : collectSource(blockSource, editors);
+  const useBlocks = !viewerOutput.hidden ? viewerReturnToBlocks : !blocks.hidden;
+  return useBlocks ? collectSource(blockSource, editors) : promptInput.value;
 }
 
 function showBlocks({ force = false, moveFocus = false } = {}) {
@@ -668,6 +826,32 @@ promptInput.addEventListener("input", () => {
   pendingRender = setTimeout(() => showBlocks({ moveFocus: document.activeElement === promptInput }), 180);
 });
 blocks.addEventListener("input", () => { copyStatus.textContent = ""; });
+
+viewerButton.addEventListener("click", () => {
+  if (viewerOutput.hidden) {
+    clearTimeout(pendingRender);
+    viewerReturnToBlocks = !blocks.hidden;
+    renderViewer(currentSource());
+    blocks.hidden = true;
+    promptInput.hidden = true;
+    view.hidden = true;
+    viewerOutput.hidden = false;
+    viewerButton.setAttribute("aria-pressed", "true");
+    return;
+  }
+
+  viewerOutput.hidden = true;
+  viewerOutput.replaceChildren();
+  viewerButton.setAttribute("aria-pressed", "false");
+  blocks.hidden = !viewerReturnToBlocks;
+  promptInput.hidden = viewerReturnToBlocks;
+  view.hidden = !viewerReturnToBlocks && !editingRaw;
+  if (viewerReturnToBlocks) {
+    editors.forEach(({ input }) => fitTextarea(input));
+  } else {
+    fitTextarea(promptInput);
+  }
+});
 
 view.addEventListener("click", () => {
   if (blocks.hidden) {
